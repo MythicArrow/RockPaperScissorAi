@@ -1,7 +1,8 @@
 import random
 import tensorflow as tf
 import numpy as np
-
+import threading
+from queue import Queue
 
 class RockPaperScissorsAI:
     def __init__(self):
@@ -9,6 +10,8 @@ class RockPaperScissorsAI:
         self.labels = {'R': 0, 'P': 1, 'S': 2}
         self.moves = ['R', 'P', 'S']
         self.model = self.build_model()
+        self.lock = threading.Lock()  # Lock for thread safety
+        self.training_queue = Queue()
 
     def build_model(self):
         model = tf.keras.Sequential([
@@ -20,10 +23,12 @@ class RockPaperScissorsAI:
         return model
 
     def get_ai_move(self):
-        if len(self.move_history) < 5:
-            return random.choice(self.moves)
+        with self.lock:  # Ensure thread-safe access to move_history
+            if len(self.move_history) < 5:
+                return random.choice(self.moves)
 
-        input_data = np.array(self.move_history[-5:]).flatten().reshape(1, -1)
+            input_data = np.array(self.move_history[-5:]).flatten().reshape(1, -1)
+        
         prediction = self.model.predict(input_data)
         predicted_move = np.argmax(prediction)
         counter_move = (predicted_move + 1) % 3
@@ -32,24 +37,37 @@ class RockPaperScissorsAI:
     def update_history(self, user_move, ai_move):
         user_move_encoded = self.labels[user_move]
         ai_move_encoded = self.labels[ai_move]
-        self.move_history.append([user_move_encoded, ai_move_encoded])
+        with self.lock:  # Ensure thread-safe modification of move_history
+            self.move_history.append([user_move_encoded, ai_move_encoded])
 
-        if len(self.move_history) > 100:
-            self.move_history.pop(0)
+            if len(self.move_history) > 100:
+                self.move_history.pop(0)
+                
+            # Add the history to the training queue for the background thread
+            self.training_queue.put(self.move_history.copy())
 
     def train_model(self):
-        if len(self.move_history) < 10:
-            return
+        while True:
+            # Wait until there is enough data in the queue
+            move_history = self.training_queue.get()
+            if len(move_history) < 10:
+                continue
 
-        X = np.array([move_pair for move_pair in self.move_history[:-1]])
-        y = np.array([self.move_history[i + 1][0] for i in range(len(self.move_history) - 1)])
+            X = np.array([move_pair for move_pair in move_history[:-1]])
+            y = np.array([move_history[i + 1][0] for i in range(len(move_history) - 1)])
 
-        self.model.fit(X, y, epochs=10, verbose=0)
+            self.model.fit(X, y, epochs=10, verbose=0)
 
 
 # Simulating a game
 def play_game():
     ai = RockPaperScissorsAI()
+
+    # Start the training thread
+    training_thread = threading.Thread(target=ai.train_model)
+    training_thread.daemon = True  # Daemonize the thread to ensure it ends with the main program
+    training_thread.start()
+
     ai_wins = 0
     user_wins = 0
     total_games = 0
@@ -76,7 +94,6 @@ def play_game():
             user_wins += 1
 
         ai.update_history(user_move, ai_move)
-        ai.train_model()
         total_games += 1
 
     print(f"Final Score - AI Wins: {ai_wins}, User Wins: {user_wins}, Total Games: {total_games}")
